@@ -32,20 +32,32 @@
             <div class="controls">
                 <label for="quality-select">选择 AVIF 压缩质量 (Q):</label>
                 <select id="quality-select">
-                    <option value="input_q70_recon.wav">Q = 70 (高压缩)</option>
-                    <option value="input_q85_recon.wav" selected>Q = 85 (均衡)</option>
-                    <option value="input_q90_recon.wav">Q = 90 (高保真)</option>
-                    <option value="input_q95_recon.wav">Q = 95 (极高保真)</option>
+                    <option value="70">Q = 70 (高压缩)</option>
+                    <option value="85" selected>Q = 85 (均衡)</option>
+                    <option value="90">Q = 90 (高保真)</option>
+                    <option value="95">Q = 95 (极高保真)</option>
                 </select>
             </div>
+            
             <audio id="recon-player" controls src="input_q85_recon.wav"></audio>
+            
             <div class="info">
-                当前播放: <span id="current-file">input_q85_recon.wav</span>
+                当前音频: <span id="current-file">input_q85_recon.wav</span>
+            </div>
+            
+            <div style="margin-top: 20px;">
+                <h4>对应 AVIF 频谱图:</h4>
+                <div class="info" style="margin-bottom: 5px;">
+                    图像文件: <span id="current-image">input_q85.avif</span>
+                </div>
+                <!-- Adding a border and max-height for better display -->
+                <img id="spectrogram-view" src="input_q85.avif" alt="AVIF Spectrogram" style="width: 100%; height: auto; border: 1px solid #ccc; max-height: 300px; object-fit: cover;">
+                <p class="info">注意：某些旧版浏览器可能无法直接显示 AVIF 图片。</p>
             </div>
         </div>
 
         <div class="info" style="text-align: center;">
-            基于 ST-DCT 变换映射为灰度图像，通过 AVIF 格式存储。
+            基于 ST-DCT 变换映射为灰度图像，通过 AVIF 格式存储。振幅信息存储于 EXIF 中以还原响度。
         </div>
     </div>
 
@@ -53,11 +65,20 @@
         const select = document.getElementById('quality-select');
         const player = document.getElementById('recon-player');
         const fileLabel = document.getElementById('current-file');
+        const imgView = document.getElementById('spectrogram-view');
+        const imgLabel = document.getElementById('current-image');
 
         select.addEventListener('change', (e) => {
-            const file = e.target.value;
-            player.src = file;
-            fileLabel.textContent = file;
+            const q = e.target.value;
+            const audioFile = `input_q${q}_recon.wav`;
+            const imageFile = `input_q${q}.avif`;
+            
+            player.src = audioFile;
+            fileLabel.textContent = audioFile;
+            
+            imgView.src = imageFile;
+            imgLabel.textContent = imageFile;
+            
             player.play();
         });
     </script>

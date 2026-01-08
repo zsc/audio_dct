@@ -78,11 +78,15 @@ def encode_audio_to_avif(audio_file, height=80, quality=75):
     
     img = Image.fromarray(img_data, mode='L')
     
+    # Embed max_val in EXIF (ImageDescription - Tag 270)
+    exif = img.getexif()
+    exif[270] = str(max_val)
+    
     base_name = os.path.splitext(audio_file)[0]
     avif_filename = f"{base_name}.avif"
     
-    img.save(avif_filename, format='AVIF', quality=quality)
-    print(f"Saved {avif_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]})")
+    img.save(avif_filename, format='AVIF', quality=quality, exif=exif)
+    print(f"Saved {avif_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
     return avif_filename
 
 def decode_avif_to_audio(avif_file):
@@ -100,15 +104,35 @@ def decode_avif_to_audio(avif_file):
     
     print(f"Detected n_fft={n_fft} from image height.")
     
+    # Try to read max_val from EXIF
+    exif = img.getexif()
+    max_val = 1.0
+    if exif and 270 in exif:
+        try:
+            max_val = float(exif[270])
+            print(f"Restored max_val from EXIF: {max_val:.4f}")
+        except ValueError:
+            print("Failed to parse max_val from EXIF, using default 1.0")
+    else:
+        print("No max_val found in EXIF, using default 1.0")
+
+    # Map [0, 255] back to [-1, 1]
     norm_spec = (img_data / 255.0) * 2 - 1
-    dct_spec = norm_spec
+    
+    # Restore amplitude
+    dct_spec = norm_spec * max_val
     
     # Inverse ST-DCT
     y_recon = st_idct(dct_spec, n_fft=n_fft, hop_length=hop_length)
     
-    if np.max(np.abs(y_recon)) > 0:
-        y_recon = y_recon / np.max(np.abs(y_recon))
-        
+    # No auto-normalization here if we trust max_val, 
+    # but we might still clip if artifacts introduced peaks.
+    # Let's clip to safe range instead of re-normalizing.
+    # Or just let wavfile.write handle clipping (it wraps or clips depending on impl).
+    # Safest is to clip.
+    # y_recon = np.clip(y_recon, -1.0, 1.0) # Actually, raw float output might be > 1 if original was.
+    # But usually audio is -1 to 1.
+    
     base_name = os.path.splitext(avif_file)[0]
     if base_name.endswith('.wav'):
         out_filename = base_name.replace('.wav', '_recon.wav')
@@ -116,7 +140,8 @@ def decode_avif_to_audio(avif_file):
         out_filename = f"{base_name}_recon.wav"
         
     sr = 22050
-    audio_int16 = (y_recon * 32767).astype(np.int16)
+    # Convert to int16
+    audio_int16 = (np.clip(y_recon, -1.0, 1.0) * 32767).astype(np.int16)
     wavfile.write(out_filename, sr, audio_int16)
     print(f"Saved {out_filename}")
     return out_filename
