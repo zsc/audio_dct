@@ -10,7 +10,7 @@ import argparse
 from PIL import Image
 import pillow_avif  # Ensures AVIF support is registered
 
-def generate_synthetic_audio(filename, duration=3.0, sr=22050):
+def generate_synthetic_audio(filename, duration=3.0, sr=16000):
     """Generate a synthetic audio file."""
     t = np.linspace(0, duration, int(sr * duration))
     sweep = np.sin(2 * np.pi * np.linspace(440, 4400, len(t)) * t)
@@ -61,7 +61,7 @@ def st_idct(dct_spec, n_fft=2048, hop_length=512, window='hann'):
 def encode_audio_to_avif(audio_file, height=80, quality=75):
     """Encode audio to AVIF image."""
     print(f"Encoding {audio_file} to AVIF (Height={height}, Q={quality})...")
-    y, sr = librosa.load(audio_file, sr=None)
+    y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
     n_fft = height
     hop_length = n_fft // 4
@@ -139,7 +139,7 @@ def decode_avif_to_audio(avif_file):
     else:
         out_filename = f"{base_name}_recon.wav"
         
-    sr = 22050
+    sr = 16000
     # Convert to int16
     audio_int16 = (np.clip(y_recon, -1.0, 1.0) * 32767).astype(np.int16)
     wavfile.write(out_filename, sr, audio_int16)
@@ -150,7 +150,7 @@ def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
     parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
     parser.add_argument("-q", "--quality", type=int, default=75, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=80, help="Image height (number of frequency bins, default 80)")
+    parser.add_argument("-H", "--height", type=int, default=80, help="Image height (number of frequency bins, default 1024)")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode...")
