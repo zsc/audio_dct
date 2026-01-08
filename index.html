@@ -1,29 +1,65 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ST-DCT Visualization</title>
+    <title>ST-DCT 编解码演示 - 不同压缩质量对比</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; padding: 20px; }
-        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 1000px; }
-        img { width: 100%; height: auto; border: 1px solid #ddd; margin-top: 10px; }
-        audio { margin: 20px 0; width: 100%; }
-        code { background: #eee; padding: 2px 4px; border-radius: 4px; }
-        .legend { margin-top: 10px; font-size: 0.9em; color: #555; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background: #f8f9fa; line-height: 1.6; }
+        .container { background: white; padding: 30px; border-radius: 12px; max-width: 700px; margin: 0 auto; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        h1 { text-align: center; color: #2c3e50; margin-bottom: 30px; }
+        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
+        h3 { margin-top: 0; color: #34495e; }
+        audio { width: 100%; margin-top: 15px; }
+        .controls { display: flex; align-items: center; gap: 15px; margin-top: 10px; }
+        select { padding: 8px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; background: white; cursor: pointer; flex-grow: 1; }
+        .info { font-size: 14px; color: #666; margin-top: 10px; }
+        code { background: #f0f0f0; padding: 2px 5px; border-radius: 4px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Short-Time DCT-II Visualization</h1>
-        <p>Processed File: <code>/Users/georgezhou/Downloads/paralingustic_prompt.wav</code></p>
-        <audio controls src="../paralingustic_prompt.wav"></audio>
-        <div class="spectrogram">
-            <h3>Spectrogram (DCT-II, Log-Frequency Scale)</h3>
-            <img src="spectrogram.png" alt="ST-DCT Spectrogram">
-            <p class="legend"><strong>Color Legend:</strong> <span style="color: blue;">Blue</span> = Negative, <strong>Black</strong> = Zero, <span style="color: red;">Red</span> = Positive. (Signed amplitude, not absolute/dB)</p>
+        <h1>ST-DCT 音频编解码演示</h1>
+        
+        <div class="section">
+            <h3>原始音频 (Original)</h3>
+            <code>input.wav</code>
+            <audio controls src="input.wav"></audio>
+        </div>
+        
+        <div class="section">
+            <h3>重建音频 (Reconstructed)</h3>
+            <div class="controls">
+                <label for="quality-select">选择 AVIF 压缩质量 (Q):</label>
+                <select id="quality-select">
+                    <option value="input_q70_recon.wav">Q = 70 (高压缩)</option>
+                    <option value="input_q85_recon.wav" selected>Q = 85 (均衡)</option>
+                    <option value="input_q90_recon.wav">Q = 90 (高保真)</option>
+                    <option value="input_q95_recon.wav">Q = 95 (极高保真)</option>
+                </select>
+            </div>
+            <audio id="recon-player" controls src="input_q85_recon.wav"></audio>
+            <div class="info">
+                当前播放: <span id="current-file">input_q85_recon.wav</span>
+            </div>
+        </div>
+
+        <div class="info" style="text-align: center;">
+            基于 ST-DCT 变换映射为灰度图像，通过 AVIF 格式存储。
         </div>
     </div>
+
+    <script>
+        const select = document.getElementById('quality-select');
+        const player = document.getElementById('recon-player');
+        const fileLabel = document.getElementById('current-file');
+
+        select.addEventListener('change', (e) => {
+            const file = e.target.value;
+            player.src = file;
+            fileLabel.textContent = file;
+            player.play();
+        });
+    </script>
 </body>
 </html>
