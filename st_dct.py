@@ -63,7 +63,7 @@ def encode_audio_to_avif(audio_file, height=80, quality=75):
     print(f"Encoding {audio_file} to AVIF (Height={height}, Q={quality})...")
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
-    n_fft = height
+    n_fft = 1024
     hop_length = n_fft // 4
     
     dct_spec = st_dct(y, n_fft=n_fft, hop_length=hop_length)
