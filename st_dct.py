@@ -259,8 +259,8 @@ def decode_audio(image_file):
 def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF/PNG)")
     parser.add_argument("input_file", help="Input file (.wav for encode, .avif/.png for decode)")
-    parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (Mel bands or DCT bins)")
+    parser.add_argument("-q", "--quality", type=int, default=95, help="AVIF encoding quality (0-100)")
+    parser.add_argument("-H", "--height", type=int, default=192, help="Image height (Mel bands or DCT bins)")
     parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
     parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
     parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
