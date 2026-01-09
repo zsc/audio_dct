@@ -7,6 +7,8 @@ import librosa
 import os
 import sys
 import argparse
+import zlib
+import base64
 from PIL import Image
 import pillow_avif  # Ensures AVIF support is registered
 
@@ -77,30 +79,45 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     # 1. Compute ST-DCT (Linear Freq)
     dct_spec = st_dct(y, n_fft=n_dct, hop_length=hop_length)
     
+    # Capture signs before ABS
+    # 1 for >= 0, 0 for < 0
+    signs = (dct_spec >= 0).astype(np.uint8)
+    packed_signs = np.packbits(signs.flatten())
+    compressed_signs = zlib.compress(packed_signs)
+    encoded_signs = base64.b64encode(compressed_signs).decode('ascii')
+    
+    # Use ABS for spectral content
+    abs_dct_spec = np.abs(dct_spec)
+    
     if use_mel:
         # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
-        final_spec = np.dot(mel_basis, dct_spec)
+        final_spec = np.dot(mel_basis, abs_dct_spec)
     else:
-        final_spec = dct_spec
+        final_spec = abs_dct_spec
 
     print(f"Final spec shape: {final_spec.shape}")
     
     # Normalization
-    max_val = np.max(np.abs(final_spec))
+    max_val = np.max(final_spec)
     if max_val == 0:
         max_val = 1.0
         
-    norm_spec = (final_spec / max_val + 1) / 2
+    norm_spec = (final_spec / max_val + 1) / 2 # Normalize to [0, 1]? 
+    # Wait, previous code was (spec / max + 1) / 2.
+    # But previous code had negative values in spec.
+    # Now spec is ABS, so it's [0, max].
+    # So (spec / max) is [0, 1].
+    # If we stick to previous formula, it maps [0, 1] to [0.5, 1].
+    # That wastes half the dynamic range.
+    # We should map [0, max] to [0, 1].
+    norm_spec = final_spec / max_val
     
     base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel"
-    # We create a dummy image to construct EXIF bytes because fromarray might need it
-    # Or just attach to the final image object.
-    
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}"
+    # Tag 270: "max_val,n_dct,use_mel|signs"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}|{encoded_signs}"
     
     if use_png:
         # 16-bit PNG
@@ -139,16 +156,17 @@ def decode_audio(image_file):
     img = Image.open(image_file)
     
     # Detect bit depth and normalize
+    # Expecting [0, 1] range now since input was ABS
     if img.mode == 'I;16' or img.mode == 'I':
         print("Detected 16-bit image.")
         img_data = np.array(img).astype(np.float32)
-        norm_spec = (img_data / 65535.0) * 2 - 1
+        norm_spec = img_data / 65535.0
     else:
         print(f"Detected 8-bit image (Mode: {img.mode}).")
         if img.mode != 'L':
             img = img.convert('L')
         img_data = np.array(img).astype(np.float32)
-        norm_spec = (img_data / 255.0) * 2 - 1
+        norm_spec = img_data / 255.0
         
     height, n_frames = img_data.shape
     
@@ -167,10 +185,16 @@ def decode_audio(image_file):
     max_val = 1.0
     n_dct = 1024
     use_mel = True
+    signs_str = None
     
     if meta_str:
         try:
-            meta = meta_str.split(',')
+            if '|' in meta_str:
+                params, signs_str = meta_str.split('|', 1)
+            else:
+                params = meta_str
+            
+            meta = params.split(',')
             max_val = float(meta[0])
             if len(meta) > 1:
                 n_dct = int(meta[1])
@@ -185,6 +209,7 @@ def decode_audio(image_file):
     hop_length = n_dct // 4
 
     # Restore amplitude
+    # norm_spec is [0, 1], so * max_val restores original ABS magnitude
     processed_spec = norm_spec * max_val
     
     if use_mel:
@@ -193,10 +218,41 @@ def decode_audio(image_file):
         n_mels = height
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
         mel_inv = np.linalg.pinv(mel_basis)
-        dct_spec = np.dot(mel_inv, processed_spec)
+        dct_spec_mag = np.dot(mel_inv, processed_spec)
     else:
-        dct_spec = processed_spec
+        dct_spec_mag = processed_spec
     
+    # Ensure magnitude is positive (pinv might cause ringing)
+    dct_spec_mag = np.abs(dct_spec_mag)
+    
+    # Apply signs
+    if signs_str:
+        print("Restoring signs from metadata...")
+        try:
+            compressed = base64.b64decode(signs_str)
+            packed = zlib.decompress(compressed)
+            unpacked = np.unpackbits(np.frombuffer(packed, dtype=np.uint8))
+            
+            expected_size = n_dct * n_frames
+            # Depending on image width, n_frames might match exactly or off by a bit if resize happened (unlikely here)
+            # Use min size
+            current_size = unpacked.size
+            if current_size >= expected_size:
+                signs_flat = unpacked[:expected_size]
+                signs = signs_flat.reshape(n_dct, n_frames)
+                # Map 1 -> 1, 0 -> -1
+                signs = signs.astype(np.float32) * 2 - 1
+                dct_spec = dct_spec_mag * signs
+            else:
+                print(f"Warning: Sign data size mismatch. Expected {expected_size}, got {current_size}.")
+                dct_spec = dct_spec_mag
+        except Exception as e:
+            print(f"Warning: Failed to process signs: {e}")
+            dct_spec = dct_spec_mag
+    else:
+        print("No sign data found. Using magnitude only.")
+        dct_spec = dct_spec_mag
+
     # Inverse ST-DCT
     y_recon = st_idct(dct_spec, n_fft=n_dct, hop_length=hop_length)
     
@@ -228,7 +284,9 @@ def main():
         print("No arguments provided. Running demo mode (Mel enabled, AVIF)...")
         input_file = 'input.wav'
         if not os.path.exists(input_file):
-            generate_synthetic_audio(input_file)
+            # Generate dummy if needed, but assuming user has it or we can't do much.
+            print("input.wav not found. Please provide an input file.")
+            sys.exit(1)
         encode_audio(input_file, height=128, quality=90, use_mel=True)
         return
 
