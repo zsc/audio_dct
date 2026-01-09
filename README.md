@@ -45,7 +45,6 @@ python calculate_psnr.py original.wav reconstructed.wav
 ```
 
 ## 可视化与对比
-- `compare.html`: 一个简单的 Web 界面，用于在浏览器中快速对比多段音频的音质。
 - `index.html`: 频谱可视化演示页面。
 
 ## 工作原理
@@ -63,4 +62,4 @@ python calculate_psnr.py original.wav reconstructed.wav
 ## 文件说明
 - `st_dct.py`: 核心编解码逻辑。
 - `calculate_psnr.py`: PSNR 评估工具。
-- `compare.html` & `index.html`: 可视化与展示工具。
+- `index.html`: 可视化与展示工具。
