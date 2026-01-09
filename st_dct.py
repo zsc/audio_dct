@@ -79,47 +79,35 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     # 1. Compute ST-DCT (Linear Freq)
     dct_spec = st_dct(y, n_fft=n_dct, hop_length=hop_length)
     
-    # Capture signs before ABS
-    # 1 for >= 0, 0 for < 0
-    signs = (dct_spec >= 0).astype(np.uint8)
-    packed_signs = np.packbits(signs.flatten())
-    compressed_signs = zlib.compress(packed_signs)
-    encoded_signs = base64.b64encode(compressed_signs).decode('ascii')
-    
-    print(f"Sign data size: Packed={len(packed_signs)} bytes, Compressed={len(compressed_signs)} bytes, Base64={len(encoded_signs)} bytes")
-    
-    # Use ABS for spectral content
-    abs_dct_spec = np.abs(dct_spec)
+    # Split into positive and negative parts
+    pos_spec = np.maximum(0, dct_spec)
+    neg_spec = np.maximum(0, -dct_spec)
     
     if use_mel:
         # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
-        final_spec = np.dot(mel_basis, abs_dct_spec)
+        pos_final = np.dot(mel_basis, pos_spec)
+        neg_final = np.dot(mel_basis, neg_spec)
     else:
-        final_spec = abs_dct_spec
+        pos_final = pos_spec
+        neg_final = neg_spec
 
-    print(f"Final spec shape: {final_spec.shape}")
+    # Stack positive and negative parts vertically
+    final_spec = np.vstack((pos_final, neg_final))
+    print(f"Final spec shape (stacked): {final_spec.shape}")
     
     # Normalization
     max_val = np.max(final_spec)
     if max_val == 0:
         max_val = 1.0
         
-    norm_spec = (final_spec / max_val + 1) / 2 # Normalize to [0, 1]? 
-    # Wait, previous code was (spec / max + 1) / 2.
-    # But previous code had negative values in spec.
-    # Now spec is ABS, so it's [0, max].
-    # So (spec / max) is [0, 1].
-    # If we stick to previous formula, it maps [0, 1] to [0.5, 1].
-    # That wastes half the dynamic range.
-    # We should map [0, max] to [0, 1].
     norm_spec = final_spec / max_val
     
     base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel|signs"
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}|{encoded_signs}"
+    # Tag 270: "max_val,n_dct,use_mel"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}"
     
     if use_png:
         # 16-bit PNG
@@ -158,7 +146,7 @@ def decode_audio(image_file):
     img = Image.open(image_file)
     
     # Detect bit depth and normalize
-    # Expecting [0, 1] range now since input was ABS
+    # Expecting [0, 1] range
     if img.mode == 'I;16' or img.mode == 'I':
         print("Detected 16-bit image.")
         img_data = np.array(img).astype(np.float32)
@@ -170,7 +158,7 @@ def decode_audio(image_file):
         img_data = np.array(img).astype(np.float32)
         norm_spec = img_data / 255.0
         
-    height, n_frames = img_data.shape
+    full_height, n_frames = img_data.shape
     
     # Parse Metadata
     # Try EXIF first (AVIF standard, and we added it to PNG too)
@@ -187,16 +175,15 @@ def decode_audio(image_file):
     max_val = 1.0
     n_dct = 1024
     use_mel = True
-    signs_str = None
     
     if meta_str:
         try:
+            # Format: "max_val,n_dct,use_mel" (no signs anymore)
             if '|' in meta_str:
-                params, signs_str = meta_str.split('|', 1)
-            else:
-                params = meta_str
-            
-            meta = params.split(',')
+                # Legacy handling attempt or just ignore suffix
+                meta_str = meta_str.split('|')[0]
+                
+            meta = meta_str.split(',')
             max_val = float(meta[0])
             if len(meta) > 1:
                 n_dct = int(meta[1])
@@ -211,50 +198,28 @@ def decode_audio(image_file):
     hop_length = n_dct // 4
 
     # Restore amplitude
-    # norm_spec is [0, 1], so * max_val restores original ABS magnitude
     processed_spec = norm_spec * max_val
+    
+    # Split back into positive and negative parts
+    half_height = full_height // 2
+    pos_processed = processed_spec[:half_height, :]
+    neg_processed = processed_spec[half_height:, :]
     
     if use_mel:
         # Inverse Mel Projection
         sr = 16000
-        n_mels = height
+        n_mels = half_height
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
         mel_inv = np.linalg.pinv(mel_basis)
-        dct_spec_mag = np.dot(mel_inv, processed_spec)
+        
+        pos_recon = np.dot(mel_inv, pos_processed)
+        neg_recon = np.dot(mel_inv, neg_processed)
+        
+        # Combine: pos - neg
+        dct_spec = pos_recon - neg_recon
     else:
-        dct_spec_mag = processed_spec
+        dct_spec = pos_processed - neg_processed
     
-    # Ensure magnitude is positive (pinv might cause ringing)
-    dct_spec_mag = np.abs(dct_spec_mag)
-    
-    # Apply signs
-    if signs_str:
-        print("Restoring signs from metadata...")
-        try:
-            compressed = base64.b64decode(signs_str)
-            packed = zlib.decompress(compressed)
-            unpacked = np.unpackbits(np.frombuffer(packed, dtype=np.uint8))
-            
-            expected_size = n_dct * n_frames
-            # Depending on image width, n_frames might match exactly or off by a bit if resize happened (unlikely here)
-            # Use min size
-            current_size = unpacked.size
-            if current_size >= expected_size:
-                signs_flat = unpacked[:expected_size]
-                signs = signs_flat.reshape(n_dct, n_frames)
-                # Map 1 -> 1, 0 -> -1
-                signs = signs.astype(np.float32) * 2 - 1
-                dct_spec = dct_spec_mag * signs
-            else:
-                print(f"Warning: Sign data size mismatch. Expected {expected_size}, got {current_size}.")
-                dct_spec = dct_spec_mag
-        except Exception as e:
-            print(f"Warning: Failed to process signs: {e}")
-            dct_spec = dct_spec_mag
-    else:
-        print("No sign data found. Using magnitude only.")
-        dct_spec = dct_spec_mag
-
     # Inverse ST-DCT
     y_recon = st_idct(dct_spec, n_fft=n_dct, hop_length=hop_length)
     
