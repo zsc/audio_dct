@@ -4,7 +4,7 @@ import librosa
 import librosa.display
 import os
 import argparse
-from st_dct import st_dct, get_mel_basis, mu_law_encode
+from st_dct import st_dct, MelRemapper, mu_law_encode
 
 def generate_visualizations(audio_file, height=192, use_mel=True):
     print(f"Generating visualizations for {audio_file}...")
@@ -47,9 +47,9 @@ def generate_visualizations(audio_file, height=192, use_mel=True):
     neg_spec = np.maximum(0, -spec)
     
     if use_mel:
-        mel_basis = get_mel_basis(sr, n_dct, height)
-        pos_spec = np.dot(mel_basis, pos_spec)
-        neg_spec = np.dot(mel_basis, neg_spec)
+        remapper = MelRemapper(sr, n_dct, height)
+        pos_spec = remapper.forward(pos_spec)
+        neg_spec = remapper.forward(neg_spec)
         
     # Combine for visualization: just magnitude or difference?
     # Let's show magnitude (sum) and sign (color?) or just the encoded channels.
