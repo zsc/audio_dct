@@ -67,11 +67,12 @@ def mu_law_decode(y, mu=255):
     """Inverse mu-law companding for input y in [0, 1]."""
     return ((1 + mu) ** y - 1) / mu
 
-def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False, use_mulaw=False):
+def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False, use_mulaw=False, ignore_negative=False):
     """Encode audio to image (AVIF or 16-bit PNG) with optional Mel-scale frequency compression."""
     mode_str = "Mel Bands" if use_mel else "Linear Bins"
     fmt = "PNG (16-bit)" if use_png else f"AVIF (Q={quality}, YUV444)"
-    print(f"Encoding {audio_file} to {fmt} ({mode_str}={height})...")
+    neg_str = ", No Negative" if ignore_negative else ""
+    print(f"Encoding {audio_file} to {fmt} ({mode_str}={height}{neg_str})...")
     
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
@@ -98,38 +99,50 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     
     # Split into positive and negative parts
     pos_spec = np.maximum(0, dct_spec)
-    neg_spec = np.maximum(0, -dct_spec)
+    if not ignore_negative:
+        neg_spec = np.maximum(0, -dct_spec)
     
     if use_mel:
         # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
         pos_final = np.dot(mel_basis, pos_spec)
-        neg_final = np.dot(mel_basis, neg_spec)
+        if not ignore_negative:
+            neg_final = np.dot(mel_basis, neg_spec)
     else:
         pos_final = pos_spec
-        neg_final = neg_spec
+        if not ignore_negative:
+            neg_final = neg_spec
 
     # Normalization (Global max across both components)
-    max_val = max(np.max(pos_final), np.max(neg_final))
+    if ignore_negative:
+        max_val = np.max(pos_final)
+    else:
+        max_val = max(np.max(pos_final), np.max(neg_final))
+        
     if max_val == 0:
         max_val = 1.0
         
     pos_norm = pos_final / max_val
-    neg_norm = neg_final / max_val
+    if not ignore_negative:
+        neg_norm = neg_final / max_val
     
     if use_mulaw:
         pos_norm = mu_law_encode(pos_norm)
-        neg_norm = mu_law_encode(neg_norm)
+        if not ignore_negative:
+            neg_norm = mu_law_encode(neg_norm)
     
     base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length"
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length}"
+    # Tag 270: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length},{1 if ignore_negative else 0}"
     
     if use_png:
         # 16-bit PNG: Stack vertically (Legacy behavior for precision)
-        final_spec = np.vstack((pos_norm, neg_norm))
+        if ignore_negative:
+            final_spec = pos_norm
+        else:
+            final_spec = np.vstack((pos_norm, neg_norm))
         print(f"Final spec shape (stacked): {final_spec.shape}")
         
         img_data = (final_spec * 65535).astype(np.uint16)
@@ -149,16 +162,22 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         
     else:
         # 8-bit AVIF: Store Pos in Red, Neg in Blue (YUV444)
-        print(f"Spec shape (per channel): {pos_norm.shape}")
-        
-        r_data = (pos_norm * 255).astype(np.uint8)
-        b_data = (neg_norm * 255).astype(np.uint8)
-        g_data = np.zeros_like(r_data)
-        
-        # Stack to (H, W, 3) for RGB
-        rgb_data = np.stack((r_data, g_data, b_data), axis=-1)
-        
-        img = Image.fromarray(rgb_data, mode='RGB')
+        if ignore_negative:
+             print(f"Spec shape (Pos only): {pos_norm.shape}")
+             img_data = (pos_norm * 255).astype(np.uint8)
+             img = Image.fromarray(img_data, mode='L')
+        else:
+            print(f"Spec shape (per channel): {pos_norm.shape}")
+            
+            r_data = (pos_norm * 255).astype(np.uint8)
+            b_data = (neg_norm * 255).astype(np.uint8)
+            g_data = np.zeros_like(r_data)
+            
+            # Stack to (H, W, 3) for RGB
+            rgb_data = np.stack((r_data, g_data, b_data), axis=-1)
+            
+            img = Image.fromarray(rgb_data, mode='RGB')
+            
         out_filename = f"{base_name}.avif"
         
         exif = img.getexif()
@@ -166,7 +185,7 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         
         # subsampling="4:4:4" ensures YUV444 (no chroma subsampling)
         img.save(out_filename, format='AVIF', quality=quality, exif=exif, subsampling="4:4:4")
-        print(f"Saved {out_filename} (Shape: {rgb_data.shape[1]}x{rgb_data.shape[0]}, MaxVal={max_val:.4f})")
+        print(f"Saved {out_filename} (Shape: {img.size[0]}x{img.size[1]}, MaxVal={max_val:.4f})")
 
     return out_filename
 
@@ -193,10 +212,11 @@ def decode_audio(image_file):
     use_mulaw = False
     original_length = 0
     pad_length = 0
+    ignore_negative = False
     
     if meta_str:
         try:
-            # Format: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length"
+            # Format: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative"
             if '|' in meta_str:
                 # Legacy handling attempt or just ignore suffix
                 meta_str = meta_str.split('|')[0]
@@ -212,14 +232,33 @@ def decode_audio(image_file):
             if len(meta) > 5:
                 original_length = int(meta[4])
                 pad_length = int(meta[5])
-            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}")
+            if len(meta) > 6:
+                ignore_negative = int(meta[6]) == 1
+            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}, no_neg={ignore_negative}")
         except ValueError:
             print("Failed to parse metadata, using defaults.")
     else:
         print("No metadata found, using defaults.")
 
     # Extract Norm Spec
-    if img.mode == 'RGB':
+    if ignore_negative:
+        if img.mode == 'RGB':
+             # Should normally be L if we encoded it, but handle RGB just in case
+             print("Detected RGB image with ignore_negative=True (Using Red channel).")
+             img_data = np.array(img).astype(np.float32)
+             pos_norm = img_data[:, :, 0] / 255.0
+        else:
+             print(f"Detected {img.mode} image with ignore_negative=True.")
+             if img.mode == 'I;16' or img.mode == 'I':
+                 norm_spec = np.array(img).astype(np.float32) / 65535.0
+             else:
+                 if img.mode != 'L': img = img.convert('L')
+                 norm_spec = np.array(img).astype(np.float32) / 255.0
+             pos_norm = norm_spec
+             
+        neg_norm = np.zeros_like(pos_norm)
+        
+    elif img.mode == 'RGB':
         print("Detected RGB image (Red=Pos, Blue=Neg).")
         img_data = np.array(img).astype(np.float32)
         # Red channel
@@ -309,6 +348,7 @@ def main():
     parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
     parser.add_argument("--mulaw", action="store_true", default=True, help="Use mu-law companding")
     parser.add_argument("--no-mulaw", action="store_false", dest="mulaw", help="Use mu-law companding")
+    parser.add_argument("--no-neg", action="store_true", help="Discard negative phase part (do not calculate or store)")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode (Mel enabled, AVIF)...")
@@ -330,7 +370,7 @@ def main():
     ext = os.path.splitext(input_file)[1].lower()
     
     if ext in ['.wav', '.mp3', '.flac', '.m4a']:
-        encode_audio(input_file, height=args.height, quality=args.quality, use_mel=args.mel, use_png=args.png, use_mulaw=args.mulaw)
+        encode_audio(input_file, height=args.height, quality=args.quality, use_mel=args.mel, use_png=args.png, use_mulaw=args.mulaw, ignore_negative=args.no_neg)
     elif ext in ['.avif', '.png']:
         decode_audio(input_file)
     else:
