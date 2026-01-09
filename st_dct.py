@@ -11,6 +11,101 @@ import zlib
 import base64
 from PIL import Image
 import pillow_avif  # Ensures AVIF support is registered
+import cv2
+
+class MelRemapper:
+    def __init__(self, sr, n_dct, n_mels):
+        self.sr = sr
+        self.n_dct = n_dct
+        self.n_mels = n_mels
+        self._init_maps()
+
+    def _init_maps(self):
+        # 1. Coordinate Mapping: Mel -> Linear (for Forward Sampling)
+        mel_max = 2595 * np.log10(1 + (self.sr/2) / 700)
+        mel_lin = np.linspace(0, mel_max, self.n_mels)
+        
+        # Convert back to Hz
+        f_hz = 700 * (10**(mel_lin / 2595) - 1)
+        
+        # Convert to Linear Bin Index (float)
+        # n_dct bins cover [0, sr/2]
+        self.map_mel_to_lin_y = f_hz * (2 * self.n_dct) / self.sr
+        
+        # Calculate Scale (Jacobian) for mipmap selection
+        self.scale = np.gradient(self.map_mel_to_lin_y)
+        
+        # 2. Coordinate Mapping: Linear -> Mel (for Inverse)
+        lin_freqs = np.linspace(0, self.sr/2, self.n_dct)
+        m_val = 2595 * np.log10(1 + lin_freqs / 700)
+        self.map_lin_to_mel_y = m_val / mel_max * (self.n_mels - 1)
+
+    def forward(self, spec_linear):
+        """
+        spec_linear: (n_dct, n_frames)
+        Returns: (n_mels, n_frames)
+        """
+        H, W = spec_linear.shape
+        pyramid = [spec_linear]
+        
+        curr = spec_linear
+        while curr.shape[0] > 1:
+            h_curr = curr.shape[0]
+            next_h = h_curr // 2
+            if next_h == 0: break
+            curr = cv2.resize(curr, (W, next_h), interpolation=cv2.INTER_LINEAR)
+            pyramid.append(curr)
+            
+        output = np.zeros((self.n_mels, W), dtype=spec_linear.dtype)
+        
+        for i in range(self.n_mels):
+            y_lin = self.map_mel_to_lin_y[i]
+            s = self.scale[i]
+            
+            if s < 1.0:
+                lod = 0.0
+            else:
+                lod = np.log2(s)
+            
+            lod_floor = int(np.floor(lod))
+            lod_ceil = lod_floor + 1
+            alpha = lod - lod_floor
+            
+            max_level = len(pyramid) - 1
+            lod_floor = min(max_level, max(0, lod_floor))
+            lod_ceil = min(max_level, max(0, lod_ceil))
+            
+            y_local_floor = y_lin / (2**lod_floor)
+            y_local_ceil = y_lin / (2**lod_ceil)
+            
+            row_val_floor = self._sample_row(pyramid[lod_floor], y_local_floor)
+            
+            if lod_floor == lod_ceil:
+                output[i, :] = row_val_floor
+            else:
+                row_val_ceil = self._sample_row(pyramid[lod_ceil], y_local_ceil)
+                output[i, :] = row_val_floor * (1 - alpha) + row_val_ceil * alpha
+                
+        return output
+
+    def _sample_row(self, img, y):
+        H, W = img.shape
+        y0 = int(np.floor(y))
+        y1 = y0 + 1
+        dy = y - y0
+        y0 = np.clip(y0, 0, H-1)
+        y1 = np.clip(y1, 0, H-1)
+        return img[y0, :] * (1 - dy) + img[y1, :] * dy
+
+    def inverse(self, spec_mel):
+        """
+        spec_mel: (n_mels, n_frames)
+        Returns: (n_dct, n_frames)
+        """
+        H_mel, W = spec_mel.shape
+        map_x = np.tile(np.arange(W, dtype=np.float32), (self.n_dct, 1))
+        map_y = np.tile(self.map_lin_to_mel_y.reshape(-1, 1), (1, W)).astype(np.float32)
+        return cv2.remap(spec_mel, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 def get_mel_basis(sr, n_dct, n_mels):
     """Generate Mel filter bank for DCT coefficients."""
@@ -104,10 +199,10 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     
     if use_mel:
         # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
-        mel_basis = get_mel_basis(sr, n_dct, n_mels)
-        pos_final = np.dot(mel_basis, pos_spec)
+        remapper = MelRemapper(sr, n_dct, n_mels)
+        pos_final = remapper.forward(pos_spec)
         if not ignore_negative:
-            neg_final = np.dot(mel_basis, neg_spec)
+            neg_final = remapper.forward(neg_spec)
     else:
         pos_final = pos_spec
         if not ignore_negative:
@@ -300,11 +395,10 @@ def decode_audio(image_file):
         # Determine n_mels from the processed data height
         n_mels = pos_processed.shape[0]
         
-        mel_basis = get_mel_basis(sr, n_dct, n_mels)
-        mel_inv = np.linalg.pinv(mel_basis)
+        remapper = MelRemapper(sr, n_dct, n_mels)
         
-        pos_recon = np.dot(mel_inv, pos_processed)
-        neg_recon = np.dot(mel_inv, neg_processed)
+        pos_recon = remapper.inverse(pos_processed)
+        neg_recon = remapper.inverse(neg_processed)
         
         # Combine: pos - neg
         dct_spec = pos_recon - neg_recon
