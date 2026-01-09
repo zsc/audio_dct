@@ -59,7 +59,15 @@ def st_idct(dct_spec, n_fft=2048, hop_length=512, window='hann'):
     
     return y_recon
 
-def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False):
+def mu_law_encode(x, mu=255):
+    """Apply mu-law companding to input x in [0, 1]."""
+    return np.log(1 + mu * x) / np.log(1 + mu)
+
+def mu_law_decode(y, mu=255):
+    """Inverse mu-law companding for input y in [0, 1]."""
+    return ((1 + mu) ** y - 1) / mu
+
+def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False, use_mulaw=False):
     """Encode audio to image (AVIF or 16-bit PNG) with optional Mel-scale frequency compression."""
     mode_str = "Mel Bands" if use_mel else "Linear Bins"
     fmt = "PNG (16-bit)" if use_png else f"AVIF (Q={quality})"
@@ -103,11 +111,14 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         
     norm_spec = final_spec / max_val
     
+    if use_mulaw:
+        norm_spec = mu_law_encode(norm_spec)
+    
     base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel"
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}"
+    # Tag 270: "max_val,n_dct,use_mel,use_mulaw"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0}"
     
     if use_png:
         # 16-bit PNG
@@ -175,10 +186,11 @@ def decode_audio(image_file):
     max_val = 1.0
     n_dct = 1024
     use_mel = True
+    use_mulaw = False
     
     if meta_str:
         try:
-            # Format: "max_val,n_dct,use_mel" (no signs anymore)
+            # Format: "max_val,n_dct,use_mel,use_mulaw" (no signs anymore)
             if '|' in meta_str:
                 # Legacy handling attempt or just ignore suffix
                 meta_str = meta_str.split('|')[0]
@@ -189,13 +201,19 @@ def decode_audio(image_file):
                 n_dct = int(meta[1])
             if len(meta) > 2:
                 use_mel = int(meta[2]) == 1
-            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}")
+            if len(meta) > 3:
+                use_mulaw = int(meta[3]) == 1
+            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}")
         except ValueError:
             print("Failed to parse metadata, using defaults.")
     else:
         print("No metadata found, using defaults.")
 
     hop_length = n_dct // 4
+
+    # Inverse Companding
+    if use_mulaw:
+        norm_spec = mu_law_decode(norm_spec)
 
     # Restore amplitude
     processed_spec = norm_spec * max_val
@@ -246,6 +264,7 @@ def main():
     parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
     parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
     parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
+    parser.add_argument("--mulaw", action="store_true", help="Use mu-law companding")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode (Mel enabled, AVIF)...")
@@ -267,7 +286,7 @@ def main():
     ext = os.path.splitext(input_file)[1].lower()
     
     if ext in ['.wav', '.mp3', '.flac', '.m4a']:
-        encode_audio(input_file, height=args.height, quality=args.quality, use_mel=args.mel, use_png=args.png)
+        encode_audio(input_file, height=args.height, quality=args.quality, use_mel=args.mel, use_png=args.png, use_mulaw=args.mulaw)
     elif ext in ['.avif', '.png']:
         decode_audio(input_file)
     else:
