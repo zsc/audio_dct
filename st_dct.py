@@ -57,10 +57,12 @@ def st_idct(dct_spec, n_fft=2048, hop_length=512, window='hann'):
     
     return y_recon
 
-def encode_audio_to_avif(audio_file, height=128, quality=75, use_mel=True):
-    """Encode audio to AVIF image with optional Mel-scale frequency compression."""
+def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False):
+    """Encode audio to image (AVIF or 16-bit PNG) with optional Mel-scale frequency compression."""
     mode_str = "Mel Bands" if use_mel else "Linear Bins"
-    print(f"Encoding {audio_file} to AVIF ({mode_str}={height}, Q={quality})...")
+    fmt = "PNG (16-bit)" if use_png else f"AVIF (Q={quality})"
+    print(f"Encoding {audio_file} to {fmt} ({mode_str}={height})...")
+    
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
     # If not using Mel, height is the n_dct itself
@@ -84,47 +86,91 @@ def encode_audio_to_avif(audio_file, height=128, quality=75, use_mel=True):
 
     print(f"Final spec shape: {final_spec.shape}")
     
-    # Normalization to 0-255
+    # Normalization
     max_val = np.max(np.abs(final_spec))
     if max_val == 0:
         max_val = 1.0
         
     norm_spec = (final_spec / max_val + 1) / 2
-    img_data = (norm_spec * 255).astype(np.uint8)
     
-    img = Image.fromarray(img_data, mode='L')
+    base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
     # Tag 270: "max_val,n_dct,use_mel"
-    exif = img.getexif()
-    exif[270] = f"{max_val},{n_dct},{1 if use_mel else 0}"
+    # We create a dummy image to construct EXIF bytes because fromarray might need it
+    # Or just attach to the final image object.
     
-    base_name = os.path.splitext(audio_file)[0]
-    avif_filename = f"{base_name}.avif"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0}"
     
-    img.save(avif_filename, format='AVIF', quality=quality, exif=exif)
-    print(f"Saved {avif_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
-    return avif_filename
-
-def decode_avif_to_audio(avif_file):
-    """Decode AVIF image back to audio, automatically detecting Mel compression."""
-    print(f"Decoding {avif_file} to WAV...")
-    img = Image.open(avif_file)
-    if img.mode != 'L':
-        img = img.convert('L')
+    if use_png:
+        # 16-bit PNG
+        img_data = (norm_spec * 65535).astype(np.uint16)
+        img = Image.fromarray(img_data, mode='I;16')
+        out_filename = f"{base_name}.png"
         
-    img_data = np.array(img).astype(np.float32)
+        # PNGInfo for metadata in PNG chunks
+        from PIL.PngImagePlugin import PngInfo
+        metadata = PngInfo()
+        metadata.add_text("Description", meta_str)
+        # Also try to add EXIF for compatibility if reader looks there
+        exif = img.getexif()
+        exif[270] = meta_str
+        
+        img.save(out_filename, format='PNG', pnginfo=metadata, exif=exif)
+        print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
+        
+    else:
+        # 8-bit AVIF
+        img_data = (norm_spec * 255).astype(np.uint8)
+        img = Image.fromarray(img_data, mode='L')
+        out_filename = f"{base_name}.avif"
+        
+        exif = img.getexif()
+        exif[270] = meta_str
+        
+        img.save(out_filename, format='AVIF', quality=quality, exif=exif)
+        print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
+
+    return out_filename
+
+def decode_audio(image_file):
+    """Decode image (AVIF or PNG) back to audio, automatically detecting Mel compression."""
+    print(f"Decoding {image_file} to WAV...")
+    img = Image.open(image_file)
+    
+    # Detect bit depth and normalize
+    if img.mode == 'I;16' or img.mode == 'I':
+        print("Detected 16-bit image.")
+        img_data = np.array(img).astype(np.float32)
+        norm_spec = (img_data / 65535.0) * 2 - 1
+    else:
+        print(f"Detected 8-bit image (Mode: {img.mode}).")
+        if img.mode != 'L':
+            img = img.convert('L')
+        img_data = np.array(img).astype(np.float32)
+        norm_spec = (img_data / 255.0) * 2 - 1
+        
     height, n_frames = img_data.shape
     
-    # Parse EXIF
+    # Parse Metadata
+    # Try EXIF first (AVIF standard, and we added it to PNG too)
     exif = img.getexif()
-    max_val = 1.0
-    n_dct = 1024 # Default
-    use_mel = True # Default
+    meta_str = None
     
     if exif and 270 in exif:
+        meta_str = exif[270]
+    else:
+        # Try PNG info if EXIF failed (common for PNG)
+        if 'Description' in img.info:
+            meta_str = img.info['Description']
+            
+    max_val = 1.0
+    n_dct = 1024
+    use_mel = True
+    
+    if meta_str:
         try:
-            meta = exif[270].split(',')
+            meta = meta_str.split(',')
             max_val = float(meta[0])
             if len(meta) > 1:
                 n_dct = int(meta[1])
@@ -138,9 +184,6 @@ def decode_avif_to_audio(avif_file):
 
     hop_length = n_dct // 4
 
-    # Map [0, 255] back to [-1, 1]
-    norm_spec = (img_data / 255.0) * 2 - 1
-    
     # Restore amplitude
     processed_spec = norm_spec * max_val
     
@@ -160,7 +203,7 @@ def decode_avif_to_audio(avif_file):
     # Clip to safe range
     y_recon = np.clip(y_recon, -1.0, 1.0)
     
-    base_name = os.path.splitext(avif_file)[0]
+    base_name = os.path.splitext(image_file)[0]
     if base_name.endswith('.wav'):
         out_filename = base_name.replace('.wav', '_recon.wav')
     else:
@@ -173,19 +216,20 @@ def decode_avif_to_audio(avif_file):
     return out_filename
 
 def main():
-    parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
-    parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
+    parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF/PNG)")
+    parser.add_argument("input_file", help="Input file (.wav for encode, .avif/.png for decode)")
     parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
     parser.add_argument("-H", "--height", type=int, default=128, help="Image height (Mel bands or DCT bins)")
     parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
     parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
+    parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
     
     if len(sys.argv) == 1:
-        print("No arguments provided. Running demo mode (Mel enabled)...")
+        print("No arguments provided. Running demo mode (Mel enabled, AVIF)...")
         input_file = 'input.wav'
         if not os.path.exists(input_file):
             generate_synthetic_audio(input_file)
-        encode_audio_to_avif(input_file, height=128, quality=90, use_mel=True)
+        encode_audio(input_file, height=128, quality=90, use_mel=True)
         return
 
     args = parser.parse_args()
@@ -198,9 +242,9 @@ def main():
     ext = os.path.splitext(input_file)[1].lower()
     
     if ext in ['.wav', '.mp3', '.flac', '.m4a']:
-        encode_audio_to_avif(input_file, height=args.height, quality=args.quality, use_mel=args.mel)
-    elif ext in ['.avif']:
-        decode_avif_to_audio(input_file)
+        encode_audio(input_file, height=args.height, quality=args.quality, use_mel=args.mel, use_png=args.png)
+    elif ext in ['.avif', '.png']:
+        decode_audio(input_file)
     else:
         print(f"Unsupported file extension: {ext}")
         sys.exit(1)
