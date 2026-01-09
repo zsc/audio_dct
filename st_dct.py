@@ -84,8 +84,17 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         
     hop_length = n_dct // 4
     
+    # Pad audio (Reflect padding, like STFT center=True)
+    original_length = len(y)
+    pad_length = n_dct // 2
+    
+    if len(y) < pad_length:
+        y_padded = np.pad(y, pad_length, mode='edge')
+    else:
+        y_padded = np.pad(y, pad_length, mode='reflect')
+    
     # 1. Compute ST-DCT (Linear Freq)
-    dct_spec = st_dct(y, n_fft=n_dct, hop_length=hop_length)
+    dct_spec = st_dct(y_padded, n_fft=n_dct, hop_length=hop_length)
     
     # Split into positive and negative parts
     pos_spec = np.maximum(0, dct_spec)
@@ -117,8 +126,8 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     base_name = os.path.splitext(audio_file)[0]
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel,use_mulaw"
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0}"
+    # Tag 270: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length"
+    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length}"
     
     if use_png:
         # 16-bit PNG
@@ -187,10 +196,12 @@ def decode_audio(image_file):
     n_dct = 1024
     use_mel = True
     use_mulaw = False
+    original_length = 0
+    pad_length = 0
     
     if meta_str:
         try:
-            # Format: "max_val,n_dct,use_mel,use_mulaw" (no signs anymore)
+            # Format: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length"
             if '|' in meta_str:
                 # Legacy handling attempt or just ignore suffix
                 meta_str = meta_str.split('|')[0]
@@ -203,7 +214,10 @@ def decode_audio(image_file):
                 use_mel = int(meta[2]) == 1
             if len(meta) > 3:
                 use_mulaw = int(meta[3]) == 1
-            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}")
+            if len(meta) > 5:
+                original_length = int(meta[4])
+                pad_length = int(meta[5])
+            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}")
         except ValueError:
             print("Failed to parse metadata, using defaults.")
     else:
@@ -241,6 +255,15 @@ def decode_audio(image_file):
     # Inverse ST-DCT
     y_recon = st_idct(dct_spec, n_fft=n_dct, hop_length=hop_length)
     
+    # Crop padding if info available
+    if original_length > 0:
+        start = pad_length
+        end = start + original_length
+        if end <= len(y_recon):
+            y_recon = y_recon[start:end]
+        else:
+            y_recon = y_recon[start:]
+
     # Clip to safe range
     y_recon = np.clip(y_recon, -1.0, 1.0)
     
@@ -259,8 +282,8 @@ def decode_audio(image_file):
 def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF/PNG)")
     parser.add_argument("input_file", help="Input file (.wav for encode, .avif/.png for decode)")
-    parser.add_argument("-q", "--quality", type=int, default=95, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=192, help="Image height (Mel bands or DCT bins)")
+    parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
+    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (Mel bands or DCT bins)")
     parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
     parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
     parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
