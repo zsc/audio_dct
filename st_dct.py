@@ -67,6 +67,7 @@ def encode_audio_to_avif(audio_file, height=80, quality=75):
     hop_length = n_fft // 4
     
     dct_spec = st_dct(y, n_fft=n_fft, hop_length=hop_length)
+    print('dct_spec', dct_spec.shape)
     
     # Normalization to 0-255
     max_val = np.max(np.abs(dct_spec))
@@ -149,15 +150,15 @@ def decode_avif_to_audio(avif_file):
 def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
     parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
-    parser.add_argument("-q", "--quality", type=int, default=75, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=80, help="Image height (number of frequency bins, default 1024)")
+    parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
+    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (number of frequency bins)")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode...")
         input_file = 'input.wav'
         if not os.path.exists(input_file):
             generate_synthetic_audio(input_file)
-        encode_audio_to_avif(input_file, height=80, quality=75)
+        encode_audio_to_avif(input_file, height=128, quality=90)
         return
 
     args = parser.parse_args()
