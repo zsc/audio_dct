@@ -49,11 +49,12 @@ python calculate_psnr.py original.wav reconstructed.wav
 
 ## 工作原理
 1. **编码阶段**:
-   - 对音频信号执行分帧和短时离散余弦变换 (ST-DCT-II)。
+   - **分帧与加窗**: 使用 **Hann 窗**对音频进行分帧。帧长默认为 `1024` (当启用 Mel 时) 或等于图像高度 (线性模式)。步长 (`hop_length`) 设为帧长的 1/4，即 **75% 重叠**，以保证平滑的重建效果。
+   - **变换**: 计算短时离散余弦变换 (ST-DCT-II)。
    - **分路处理**: 将 DCT 谱拆分为正部 (`max(0, x)`) 和负部 (`max(0, -x)`)。
    - **特征映射**: 对幅值应用 mu-law 压扩及可选的 Mel 滤波器组降维。
    - **图像生成**: 将正部存入 **红色通道**，负部存入 **蓝色通道**，绿色通道保持为 0 (YUV444 采样)。
-   - **元数据嵌入**: 将缩放因子等元数据写入 EXIF。
+   - **元数据嵌入**: 将缩放因子、窗长等元数据写入 EXIF。
 2. **解码阶段**:
    - 从图像的红蓝通道中提取幅值，并合并回带符号的 DCT 谱。
    - 逆转 Mel 变换（如适用）及 mu-law 映射。
@@ -62,4 +63,5 @@ python calculate_psnr.py original.wav reconstructed.wav
 ## 文件说明
 - `st_dct.py`: 核心编解码逻辑。
 - `calculate_psnr.py`: PSNR 评估工具。
+- `visualize.py`: 生成可视化图像的脚本。
 - `index.html`: 可视化与展示工具。

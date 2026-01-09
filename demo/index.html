@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ST-DCT 音频编解码可视化</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+        }
+        h1, h2, h3 {
+            color: #111;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            margin-bottom: 30px;
+        }
+        .img-container {
+            margin: 20px 0;
+            text-align: center;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+        audio {
+            width: 100%;
+            margin-top: 10px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        code {
+            background: #f0f0f0;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .controls {
+            background: #e8f0fe;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid #d2e3fc;
+        }
+        select {
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-size: 16px;
+            margin-left: 10px;
+        }
+        .psnr-box {
+            display: inline-block;
+            background: #e6fffa;
+            color: #047481;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-left: 10px;
+            border: 1px solid #b2f5ea;
+        }
+    </style>
+</head>
+<body>
+
+    <header style="text-align: center; margin-bottom: 40px;">
+        <h1>ST-DCT 音频编解码可视化</h1>
+        <p>用于音频到图像编码的短时离散余弦变换 (Short-Time Discrete Cosine Transform)</p>
+    </header>
+
+    <div class="container controls">
+        <label for="config-select"><strong>选择配置 / Configuration:</strong></label>
+        <select id="config-select" onchange="updateConfig()">
+            <!-- Options will be populated by JS -->
+        </select>
+        <p style="margin-top: 10px; font-size: 0.9em; color: #555;" id="config-desc">
+            <!-- Description will be updated by JS -->
+        </p>
+    </div>
+
+    <!-- 1. Reconstruction (Moved to Top) -->
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2>1. 重建结果 (Reconstruction)</h2>
+            <div>
+                PSNR: <span id="psnr-display" class="psnr-box">-- dB</span>
+            </div>
+        </div>
+        <p>从图像表示解码并与原始音频对比。</p>
+        <div class="grid">
+            <div>
+                <h3>重建音频</h3>
+                <audio id="recon-audio" controls src="input_recon.wav"></audio>
+                <p style="font-size: 0.9em; color: #666; margin-top: 5px;">原始音频 (参考):</p>
+                <audio controls src="input.wav"></audio>
+            </div>
+            <div>
+                <h3>编码图像 (AVIF)</h3>
+                <div class="img-container" style="margin: 0;">
+                    <img id="avif-img" src="input.avif" alt="Encoded AVIF" style="max-height: 200px; object-fit: contain; background: #eee;">
+                </div>
+                <p style="text-align: center; margin-top: 5px;">
+                    <a id="avif-link" href="input.avif" target="_blank">下载/查看原始 AVIF</a><br>
+                    <small>(如果浏览器不支持 AVIF，上方可能无法显示)</small>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>2. 原始音频与波形 (Original Audio)</h2>
+        <p>输入文件: <code>input.wav</code></p>
+        <div class="img-container">
+            <img src="input_vis.png" alt="输入波形">
+            <p><em>输入音频的波形视图。</em></p>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>3. 频谱分析 (Spectral Analysis)</h2>
+        <p>音频使用 ST-DCT-II 进行变换，采用 75% 重叠的 Hann 窗。</p>
+        <div class="img-container">
+            <img src="spectrogram.png" alt="ST-DCT 频谱图">
+            <p><em>重建的频谱图 (dB 刻度)。</em></p>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>4. 编码原理 (红/蓝 映射)</h2>
+        <p>正系数存储在 <span style="color:red; font-weight:bold;">红色 (Red)</span> 通道，负系数存储在 <span style="color:blue; font-weight:bold;">蓝色 (Blue)</span> 通道。这保留了对重建至关重要的符号/相位信息。</p>
+        <div class="img-container">
+            <img src="dct_vis.png" alt="编码通道">
+            <p><em>上图: 正分量 (红), 下图: 负分量 (蓝)。经过 Mu-law 压缩。</em></p>
+        </div>
+    </div>
+
+    <footer style="text-align: center; margin-top: 50px; color: #777;">
+        <p>Generated by ST-DCT Codec Tools</p>
+    </footer>
+
+    <script>
+        // 配置数据
+        const configs = {
+            "default": {
+                name: "默认配置 (Default, Q90, H128)",
+                desc: "原始设置: AVIF 质量 90, 128 Mel 频带",
+                audio_recon: "input_recon.wav",
+                avif: "input.avif",
+                psnr: "22.11"
+            },
+            "q70": {
+                name: "AVIF 质量 70 (H128)",
+                desc: "AVIF 压缩质量降低至 70, 高度 128",
+                audio_recon: "input_q70_recon.wav",
+                avif: "input_q70.avif",
+                psnr: "22.03"
+            },
+            "q85": {
+                name: "AVIF 质量 85 (H128)",
+                desc: "AVIF 压缩质量设置为 85, 高度 128",
+                audio_recon: "input_q85_recon.wav",
+                avif: "input_q85.avif",
+                psnr: "22.10"
+            },
+            "q90": {
+                name: "AVIF 质量 90 (H192*)",
+                desc: "AVIF 压缩质量设置为 90, 高度 192 (预设)",
+                audio_recon: "input_q90_recon.wav",
+                avif: "input_q90.avif",
+                psnr: "25.53"
+            },
+            "q95": {
+                name: "AVIF 质量 95 (H128)",
+                desc: "AVIF 压缩质量设置为 95, 高度 128",
+                audio_recon: "input_q95_recon.wav",
+                avif: "input_q95.avif",
+                psnr: "22.12"
+            },
+            "h80": {
+                name: "高度 80 (Q90)",
+                desc: "低频率分辨率: 80 Mel 频带",
+                audio_recon: "input_h80_recon.wav",
+                avif: "input_h80.avif",
+                psnr: "21.24"
+            },
+            "h256": {
+                name: "高度 256 (Q90)",
+                desc: "中高频率分辨率: 256 Mel 频带",
+                audio_recon: "input_h256_recon.wav",
+                avif: "input_h256.avif",
+                psnr: "30.94"
+            },
+            "h512": {
+                name: "高度 512 (Q90)",
+                desc: "高频率分辨率: 512 Mel 频带",
+                audio_recon: "input_h512_recon.wav",
+                avif: "input_h512.avif",
+                psnr: "39.70"
+            }
+        };
+
+        const select = document.getElementById('config-select');
+        const desc = document.getElementById('config-desc');
+        const audioRecon = document.getElementById('recon-audio');
+        const avifLink = document.getElementById('avif-link');
+        const avifImg = document.getElementById('avif-img');
+        const psnrDisplay = document.getElementById('psnr-display');
+
+        // 初始化下拉菜单
+        for (const [key, value] of Object.entries(configs)) {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = value.name;
+            select.appendChild(option);
+        }
+
+        // 更新函数
+        function updateConfig() {
+            const key = select.value;
+            const config = configs[key];
+
+            if (config) {
+                desc.textContent = config.desc;
+                audioRecon.src = config.audio_recon;
+                avifLink.href = config.avif;
+                avifImg.src = config.avif;
+                psnrDisplay.textContent = config.psnr + " dB";
+                
+                // 重新加载音频以确保更改生效
+                audioRecon.load();
+            }
+        }
+
+        // 初始化页面状态
+        updateConfig();
+    </script>
+
+</body>
+</html>
