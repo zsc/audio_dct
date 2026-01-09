@@ -21,6 +21,16 @@ def generate_synthetic_audio(filename, duration=3.0, sr=16000):
     wavfile.write(filename, sr, audio)
     print(f"Generated {filename}")
 
+def get_mel_basis(sr, n_dct, n_mels):
+    """Generate Mel filter bank for DCT coefficients."""
+    # Librosa expects n_fft for STFT, where bins = n_fft // 2 + 1
+    # We want to match n_dct bins.
+    # Set n_fft_librosa = 2 * n_dct => n_dct + 1 bins.
+    # Drop the last bin (Nyquist) to match n_dct bins.
+    n_fft_librosa = 2 * n_dct
+    m = librosa.filters.mel(sr=sr, n_fft=n_fft_librosa, n_mels=n_mels)
+    return m[:, :-1]
+
 def st_dct(y, n_fft=2048, hop_length=512, window='hann'):
     """Compute Short-Time DCT-II."""
     frames = librosa.util.frame(y, frame_length=n_fft, hop_length=hop_length)
@@ -58,30 +68,41 @@ def st_idct(dct_spec, n_fft=2048, hop_length=512, window='hann'):
     
     return y_recon
 
-def encode_audio_to_avif(audio_file, height=80, quality=75):
-    """Encode audio to AVIF image."""
-    print(f"Encoding {audio_file} to AVIF (Height={height}, Q={quality})...")
+def encode_audio_to_avif(audio_file, height=128, quality=75):
+    """Encode audio to AVIF image with Mel-scale frequency compression."""
+    print(f"Encoding {audio_file} to AVIF (Mel Bands={height}, Q={quality})...")
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
-    n_fft = 1024
-    hop_length = n_fft // 4
+    n_dct = 1024
+    hop_length = n_dct // 4
     
-    dct_spec = st_dct(y, n_fft=n_fft, hop_length=hop_length)
-    print('dct_spec', dct_spec.shape)
+    # 1. Compute ST-DCT (Linear Freq)
+    dct_spec = st_dct(y, n_fft=n_dct, hop_length=hop_length)
+    print('dct_spec linear shape:', dct_spec.shape)
+    
+    # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
+    # height is interpreted as n_mels
+    n_mels = height
+    mel_basis = get_mel_basis(sr, n_dct, n_mels)
+    print(f"Mel Basis Shape: {mel_basis.shape}")
+    
+    mel_spec = np.dot(mel_basis, dct_spec)
+    print('mel_spec shape:', mel_spec.shape)
     
     # Normalization to 0-255
-    max_val = np.max(np.abs(dct_spec))
+    max_val = np.max(np.abs(mel_spec))
     if max_val == 0:
         max_val = 1.0
         
-    norm_spec = (dct_spec / max_val + 1) / 2
+    norm_spec = (mel_spec / max_val + 1) / 2
     img_data = (norm_spec * 255).astype(np.uint8)
     
     img = Image.fromarray(img_data, mode='L')
     
-    # Embed max_val in EXIF (ImageDescription - Tag 270)
+    # Embed metadata in EXIF
+    # Tag 270: "max_val,n_dct"
     exif = img.getexif()
-    exif[270] = str(max_val)
+    exif[270] = f"{max_val},{n_dct}"
     
     base_name = os.path.splitext(audio_file)[0]
     avif_filename = f"{base_name}.avif"
@@ -91,48 +112,60 @@ def encode_audio_to_avif(audio_file, height=80, quality=75):
     return avif_filename
 
 def decode_avif_to_audio(avif_file):
-    """Decode AVIF image to audio."""
+    """Decode AVIF image (Mel bands) to audio."""
     print(f"Decoding {avif_file} to WAV...")
     img = Image.open(avif_file)
     if img.mode != 'L':
         img = img.convert('L')
         
     img_data = np.array(img).astype(np.float32)
+    n_mels, n_frames = img_data.shape
     
-    # Detect n_fft from image height
-    n_fft = img_data.shape[0]
-    hop_length = n_fft // 4
+    print(f"Loaded image: {n_mels} Mel bands, {n_frames} frames.")
     
-    print(f"Detected n_fft={n_fft} from image height.")
-    
-    # Try to read max_val from EXIF
+    # Parse EXIF
     exif = img.getexif()
     max_val = 1.0
+    n_dct = 1024 # Default
+    
     if exif and 270 in exif:
         try:
-            max_val = float(exif[270])
-            print(f"Restored max_val from EXIF: {max_val:.4f}")
+            meta = exif[270].split(',')
+            max_val = float(meta[0])
+            if len(meta) > 1:
+                n_dct = int(meta[1])
+            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}")
         except ValueError:
-            print("Failed to parse max_val from EXIF, using default 1.0")
+            print("Failed to parse metadata, using defaults.")
     else:
-        print("No max_val found in EXIF, using default 1.0")
+        print("No metadata found, using defaults.")
+
+    hop_length = n_dct // 4
 
     # Map [0, 255] back to [-1, 1]
     norm_spec = (img_data / 255.0) * 2 - 1
     
     # Restore amplitude
-    dct_spec = norm_spec * max_val
+    mel_spec = norm_spec * max_val
+    
+    # 3. Inverse Mel Projection
+    sr = 16000
+    mel_basis = get_mel_basis(sr, n_dct, n_mels)
+    
+    # Pseudo-inverse
+    # M is (n_mels, n_dct)
+    # We want to solve Y = M X for X.
+    # X = pinv(M) Y
+    mel_inv = np.linalg.pinv(mel_basis)
+    print(f"Computed Mel Inverse: {mel_inv.shape}")
+    
+    dct_spec = np.dot(mel_inv, mel_spec)
     
     # Inverse ST-DCT
-    y_recon = st_idct(dct_spec, n_fft=n_fft, hop_length=hop_length)
+    y_recon = st_idct(dct_spec, n_fft=n_dct, hop_length=hop_length)
     
-    # No auto-normalization here if we trust max_val, 
-    # but we might still clip if artifacts introduced peaks.
-    # Let's clip to safe range instead of re-normalizing.
-    # Or just let wavfile.write handle clipping (it wraps or clips depending on impl).
-    # Safest is to clip.
-    # y_recon = np.clip(y_recon, -1.0, 1.0) # Actually, raw float output might be > 1 if original was.
-    # But usually audio is -1 to 1.
+    # Clip to safe range
+    y_recon = np.clip(y_recon, -1.0, 1.0)
     
     base_name = os.path.splitext(avif_file)[0]
     if base_name.endswith('.wav'):
@@ -142,7 +175,7 @@ def decode_avif_to_audio(avif_file):
         
     sr = 16000
     # Convert to int16
-    audio_int16 = (np.clip(y_recon, -1.0, 1.0) * 32767).astype(np.int16)
+    audio_int16 = (y_recon * 32767).astype(np.int16)
     wavfile.write(out_filename, sr, audio_int16)
     print(f"Saved {out_filename}")
     return out_filename
@@ -151,7 +184,7 @@ def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
     parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
     parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (number of frequency bins)")
+    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (number of Mel bands)")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode...")
