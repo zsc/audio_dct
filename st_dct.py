@@ -70,7 +70,7 @@ def mu_law_decode(y, mu=255):
 def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False, use_mulaw=False):
     """Encode audio to image (AVIF or 16-bit PNG) with optional Mel-scale frequency compression."""
     mode_str = "Mel Bands" if use_mel else "Linear Bins"
-    fmt = "PNG (16-bit)" if use_png else f"AVIF (Q={quality})"
+    fmt = "PNG (16-bit)" if use_png else f"AVIF (Q={quality}, YUV444)"
     print(f"Encoding {audio_file} to {fmt} ({mode_str}={height})...")
     
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
@@ -109,19 +109,17 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         pos_final = pos_spec
         neg_final = neg_spec
 
-    # Stack positive and negative parts vertically
-    final_spec = np.vstack((pos_final, neg_final))
-    print(f"Final spec shape (stacked): {final_spec.shape}")
-    
-    # Normalization
-    max_val = np.max(final_spec)
+    # Normalization (Global max across both components)
+    max_val = max(np.max(pos_final), np.max(neg_final))
     if max_val == 0:
         max_val = 1.0
         
-    norm_spec = final_spec / max_val
+    pos_norm = pos_final / max_val
+    neg_norm = neg_final / max_val
     
     if use_mulaw:
-        norm_spec = mu_law_encode(norm_spec)
+        pos_norm = mu_law_encode(pos_norm)
+        neg_norm = mu_law_encode(neg_norm)
     
     base_name = os.path.splitext(audio_file)[0]
     
@@ -130,8 +128,11 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length}"
     
     if use_png:
-        # 16-bit PNG
-        img_data = (norm_spec * 65535).astype(np.uint16)
+        # 16-bit PNG: Stack vertically (Legacy behavior for precision)
+        final_spec = np.vstack((pos_norm, neg_norm))
+        print(f"Final spec shape (stacked): {final_spec.shape}")
+        
+        img_data = (final_spec * 65535).astype(np.uint16)
         img = Image.fromarray(img_data, mode='I;16')
         out_filename = f"{base_name}.png"
         
@@ -147,16 +148,25 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
         
     else:
-        # 8-bit AVIF
-        img_data = (norm_spec * 255).astype(np.uint8)
-        img = Image.fromarray(img_data, mode='L')
+        # 8-bit AVIF: Store Pos in Red, Neg in Blue (YUV444)
+        print(f"Spec shape (per channel): {pos_norm.shape}")
+        
+        r_data = (pos_norm * 255).astype(np.uint8)
+        b_data = (neg_norm * 255).astype(np.uint8)
+        g_data = np.zeros_like(r_data)
+        
+        # Stack to (H, W, 3) for RGB
+        rgb_data = np.stack((r_data, g_data, b_data), axis=-1)
+        
+        img = Image.fromarray(rgb_data, mode='RGB')
         out_filename = f"{base_name}.avif"
         
         exif = img.getexif()
         exif[270] = meta_str
         
-        img.save(out_filename, format='AVIF', quality=quality, exif=exif)
-        print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
+        # subsampling="4:4:4" ensures YUV444 (no chroma subsampling)
+        img.save(out_filename, format='AVIF', quality=quality, exif=exif, subsampling="4:4:4")
+        print(f"Saved {out_filename} (Shape: {rgb_data.shape[1]}x{rgb_data.shape[0]}, MaxVal={max_val:.4f})")
 
     return out_filename
 
@@ -164,21 +174,6 @@ def decode_audio(image_file):
     """Decode image (AVIF or PNG) back to audio, automatically detecting Mel compression."""
     print(f"Decoding {image_file} to WAV...")
     img = Image.open(image_file)
-    
-    # Detect bit depth and normalize
-    # Expecting [0, 1] range
-    if img.mode == 'I;16' or img.mode == 'I':
-        print("Detected 16-bit image.")
-        img_data = np.array(img).astype(np.float32)
-        norm_spec = img_data / 65535.0
-    else:
-        print(f"Detected 8-bit image (Mode: {img.mode}).")
-        if img.mode != 'L':
-            img = img.convert('L')
-        img_data = np.array(img).astype(np.float32)
-        norm_spec = img_data / 255.0
-        
-    full_height, n_frames = img_data.shape
     
     # Parse Metadata
     # Try EXIF first (AVIF standard, and we added it to PNG too)
@@ -223,24 +218,49 @@ def decode_audio(image_file):
     else:
         print("No metadata found, using defaults.")
 
-    hop_length = n_dct // 4
+    # Extract Norm Spec
+    if img.mode == 'RGB':
+        print("Detected RGB image (Red=Pos, Blue=Neg).")
+        img_data = np.array(img).astype(np.float32)
+        # Red channel
+        pos_norm = img_data[:, :, 0] / 255.0
+        # Blue channel
+        neg_norm = img_data[:, :, 2] / 255.0
+    else:
+        # Legacy/PNG Grayscale Split
+        if img.mode == 'I;16' or img.mode == 'I':
+            print("Detected 16-bit grayscale image.")
+            img_data = np.array(img).astype(np.float32)
+            norm_spec = img_data / 65535.0
+        else:
+            print(f"Detected 8-bit grayscale image (Mode: {img.mode}).")
+            if img.mode != 'L':
+                img = img.convert('L')
+            img_data = np.array(img).astype(np.float32)
+            norm_spec = img_data / 255.0
+            
+        full_height = img_data.shape[0]
+        half_height = full_height // 2
+        pos_norm = norm_spec[:half_height, :]
+        neg_norm = norm_spec[half_height:, :]
 
     # Inverse Companding
     if use_mulaw:
-        norm_spec = mu_law_decode(norm_spec)
+        pos_norm = mu_law_decode(pos_norm)
+        neg_norm = mu_law_decode(neg_norm)
 
     # Restore amplitude
-    processed_spec = norm_spec * max_val
-    
-    # Split back into positive and negative parts
-    half_height = full_height // 2
-    pos_processed = processed_spec[:half_height, :]
-    neg_processed = processed_spec[half_height:, :]
+    pos_processed = pos_norm * max_val
+    neg_processed = neg_norm * max_val
+
+    hop_length = n_dct // 4
     
     if use_mel:
         # Inverse Mel Projection
         sr = 16000
-        n_mels = half_height
+        # Determine n_mels from the processed data height
+        n_mels = pos_processed.shape[0]
+        
         mel_basis = get_mel_basis(sr, n_dct, n_mels)
         mel_inv = np.linalg.pinv(mel_basis)
         
