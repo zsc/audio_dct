@@ -57,41 +57,47 @@ def st_idct(dct_spec, n_fft=2048, hop_length=512, window='hann'):
     
     return y_recon
 
-def encode_audio_to_avif(audio_file, height=128, quality=75):
-    """Encode audio to AVIF image with Mel-scale frequency compression."""
-    print(f"Encoding {audio_file} to AVIF (Mel Bands={height}, Q={quality})...")
+def encode_audio_to_avif(audio_file, height=128, quality=75, use_mel=True):
+    """Encode audio to AVIF image with optional Mel-scale frequency compression."""
+    mode_str = "Mel Bands" if use_mel else "Linear Bins"
+    print(f"Encoding {audio_file} to AVIF ({mode_str}={height}, Q={quality})...")
     y, sr = librosa.load(audio_file, sr=16000, mono=True)
     
-    n_dct = 1024
+    # If not using Mel, height is the n_dct itself
+    if use_mel:
+        n_dct = 1024
+        n_mels = height
+    else:
+        n_dct = height
+        
     hop_length = n_dct // 4
     
     # 1. Compute ST-DCT (Linear Freq)
     dct_spec = st_dct(y, n_fft=n_dct, hop_length=hop_length)
-    print('dct_spec linear shape:', dct_spec.shape)
     
-    # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
-    # height is interpreted as n_mels
-    n_mels = height
-    mel_basis = get_mel_basis(sr, n_dct, n_mels)
-    print(f"Mel Basis Shape: {mel_basis.shape}")
-    
-    mel_spec = np.dot(mel_basis, dct_spec)
-    print('mel_spec shape:', mel_spec.shape)
+    if use_mel:
+        # 2. Apply Mel Filter Bank (Linear Freq -> Mel Bands)
+        mel_basis = get_mel_basis(sr, n_dct, n_mels)
+        final_spec = np.dot(mel_basis, dct_spec)
+    else:
+        final_spec = dct_spec
+
+    print(f"Final spec shape: {final_spec.shape}")
     
     # Normalization to 0-255
-    max_val = np.max(np.abs(mel_spec))
+    max_val = np.max(np.abs(final_spec))
     if max_val == 0:
         max_val = 1.0
         
-    norm_spec = (mel_spec / max_val + 1) / 2
+    norm_spec = (final_spec / max_val + 1) / 2
     img_data = (norm_spec * 255).astype(np.uint8)
     
     img = Image.fromarray(img_data, mode='L')
     
     # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct"
+    # Tag 270: "max_val,n_dct,use_mel"
     exif = img.getexif()
-    exif[270] = f"{max_val},{n_dct}"
+    exif[270] = f"{max_val},{n_dct},{1 if use_mel else 0}"
     
     base_name = os.path.splitext(audio_file)[0]
     avif_filename = f"{base_name}.avif"
@@ -101,21 +107,20 @@ def encode_audio_to_avif(audio_file, height=128, quality=75):
     return avif_filename
 
 def decode_avif_to_audio(avif_file):
-    """Decode AVIF image (Mel bands) to audio."""
+    """Decode AVIF image back to audio, automatically detecting Mel compression."""
     print(f"Decoding {avif_file} to WAV...")
     img = Image.open(avif_file)
     if img.mode != 'L':
         img = img.convert('L')
         
     img_data = np.array(img).astype(np.float32)
-    n_mels, n_frames = img_data.shape
-    
-    print(f"Loaded image: {n_mels} Mel bands, {n_frames} frames.")
+    height, n_frames = img_data.shape
     
     # Parse EXIF
     exif = img.getexif()
     max_val = 1.0
     n_dct = 1024 # Default
+    use_mel = True # Default
     
     if exif and 270 in exif:
         try:
@@ -123,7 +128,9 @@ def decode_avif_to_audio(avif_file):
             max_val = float(meta[0])
             if len(meta) > 1:
                 n_dct = int(meta[1])
-            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}")
+            if len(meta) > 2:
+                use_mel = int(meta[2]) == 1
+            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}")
         except ValueError:
             print("Failed to parse metadata, using defaults.")
     else:
@@ -135,20 +142,17 @@ def decode_avif_to_audio(avif_file):
     norm_spec = (img_data / 255.0) * 2 - 1
     
     # Restore amplitude
-    mel_spec = norm_spec * max_val
+    processed_spec = norm_spec * max_val
     
-    # 3. Inverse Mel Projection
-    sr = 16000
-    mel_basis = get_mel_basis(sr, n_dct, n_mels)
-    
-    # Pseudo-inverse
-    # M is (n_mels, n_dct)
-    # We want to solve Y = M X for X.
-    # X = pinv(M) Y
-    mel_inv = np.linalg.pinv(mel_basis)
-    print(f"Computed Mel Inverse: {mel_inv.shape}")
-    
-    dct_spec = np.dot(mel_inv, mel_spec)
+    if use_mel:
+        # Inverse Mel Projection
+        sr = 16000
+        n_mels = height
+        mel_basis = get_mel_basis(sr, n_dct, n_mels)
+        mel_inv = np.linalg.pinv(mel_basis)
+        dct_spec = np.dot(mel_inv, processed_spec)
+    else:
+        dct_spec = processed_spec
     
     # Inverse ST-DCT
     y_recon = st_idct(dct_spec, n_fft=n_dct, hop_length=hop_length)
@@ -163,7 +167,6 @@ def decode_avif_to_audio(avif_file):
         out_filename = f"{base_name}_recon.wav"
         
     sr = 16000
-    # Convert to int16
     audio_int16 = (y_recon * 32767).astype(np.int16)
     wavfile.write(out_filename, sr, audio_int16)
     print(f"Saved {out_filename}")
@@ -171,10 +174,20 @@ def decode_avif_to_audio(avif_file):
 
 def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
-    parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)", default='input.wav')
+    parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
     parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
-    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (number of Mel bands)")
+    parser.add_argument("-H", "--height", type=int, default=128, help="Image height (Mel bands or DCT bins)")
+    parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
+    parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
     
+    if len(sys.argv) == 1:
+        print("No arguments provided. Running demo mode (Mel enabled)...")
+        input_file = 'input.wav'
+        if not os.path.exists(input_file):
+            generate_synthetic_audio(input_file)
+        encode_audio_to_avif(input_file, height=128, quality=90, use_mel=True)
+        return
+
     args = parser.parse_args()
     input_file = args.input_file
     
@@ -185,7 +198,7 @@ def main():
     ext = os.path.splitext(input_file)[1].lower()
     
     if ext in ['.wav', '.mp3', '.flac', '.m4a']:
-        encode_audio_to_avif(input_file, height=args.height, quality=args.quality)
+        encode_audio_to_avif(input_file, height=args.height, quality=args.quality, use_mel=args.mel)
     elif ext in ['.avif']:
         decode_avif_to_audio(input_file)
     else:
