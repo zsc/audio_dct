@@ -287,7 +287,8 @@ def main():
     parser.add_argument("--mel", action="store_true", default=True, help="Use Mel-scale frequency compression (default: True)")
     parser.add_argument("--no-mel", action="store_false", dest="mel", help="Use linear frequency scale")
     parser.add_argument("--png", action="store_true", help="Use 16-bit PNG format instead of AVIF")
-    parser.add_argument("--mulaw", action="store_true", help="Use mu-law companding")
+    parser.add_argument("--mulaw", action="store_true", default=True, help="Use mu-law companding")
+    parser.add_argument("--no-mulaw", action="store_false", dest="mulaw", help="Use mu-law companding")
     
     if len(sys.argv) == 1:
         print("No arguments provided. Running demo mode (Mel enabled, AVIF)...")
