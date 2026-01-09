@@ -108,23 +108,44 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         pos_final = np.dot(mel_basis, pos_spec)
         if not ignore_negative:
             neg_final = np.dot(mel_basis, neg_spec)
+            
+        # Per-band normalization
+        if ignore_negative:
+            max_vals = np.max(pos_final, axis=1)
+        else:
+            max_vals = np.maximum(np.max(pos_final, axis=1), np.max(neg_final, axis=1))
+        
+        # Avoid division by zero
+        max_vals[max_vals == 0] = 1.0
+        
+        pos_norm = pos_final / max_vals[:, None]
+        if not ignore_negative:
+            neg_norm = neg_final / max_vals[:, None]
+            
+        # Store max_vals in meta_str
+        scales_str = base64.b64encode(max_vals.astype(np.float32).tobytes()).decode('ascii')
+        meta_str = f"v2,{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length},{1 if ignore_negative else 0},{scales_str}"
+        max_val_display = np.mean(max_vals) # For display only
     else:
         pos_final = pos_spec
         if not ignore_negative:
             neg_final = neg_spec
 
-    # Normalization (Global max across both components)
-    if ignore_negative:
-        max_val = np.max(pos_final)
-    else:
-        max_val = max(np.max(pos_final), np.max(neg_final))
+        # Normalization (Global max across both components)
+        if ignore_negative:
+            max_val = np.max(pos_final)
+        else:
+            max_val = max(np.max(pos_final), np.max(neg_final))
+            
+        if max_val == 0:
+            max_val = 1.0
+            
+        pos_norm = pos_final / max_val
+        if not ignore_negative:
+            neg_norm = neg_final / max_val
         
-    if max_val == 0:
-        max_val = 1.0
-        
-    pos_norm = pos_final / max_val
-    if not ignore_negative:
-        neg_norm = neg_final / max_val
+        meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length},{1 if ignore_negative else 0}"
+        max_val_display = max_val
     
     if use_mulaw:
         pos_norm = mu_law_encode(pos_norm)
@@ -132,10 +153,6 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
             neg_norm = mu_law_encode(neg_norm)
     
     base_name = os.path.splitext(audio_file)[0]
-    
-    # Embed metadata in EXIF
-    # Tag 270: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative"
-    meta_str = f"{max_val},{n_dct},{1 if use_mel else 0},{1 if use_mulaw else 0},{original_length},{pad_length},{1 if ignore_negative else 0}"
     
     if use_png:
         # 16-bit PNG: Stack vertically (Legacy behavior for precision)
@@ -158,7 +175,7 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         exif[270] = meta_str
         
         img.save(out_filename, format='PNG', pnginfo=metadata, exif=exif)
-        print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, MaxVal={max_val:.4f})")
+        print(f"Saved {out_filename} (Shape: {img_data.shape[1]}x{img_data.shape[0]}, AvgMaxVal={max_val_display:.4f})")
         
     else:
         # 8-bit AVIF: Store Pos in Red, Neg in Blue (YUV444)
@@ -185,7 +202,7 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
         
         # subsampling="4:4:4" ensures YUV444 (no chroma subsampling)
         img.save(out_filename, format='AVIF', quality=quality, exif=exif, subsampling="4:4:4")
-        print(f"Saved {out_filename} (Shape: {img.size[0]}x{img.size[1]}, MaxVal={max_val:.4f})")
+        print(f"Saved {out_filename} (Shape: {img.size[0]}x{img.size[1]}, AvgMaxVal={max_val_display:.4f})")
 
     return out_filename
 
@@ -207,6 +224,7 @@ def decode_audio(image_file):
             meta_str = img.info['Description']
             
     max_val = 1.0
+    max_vals = None
     n_dct = 1024
     use_mel = True
     use_mulaw = False
@@ -216,27 +234,38 @@ def decode_audio(image_file):
     
     if meta_str:
         try:
-            # Format: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative"
             if '|' in meta_str:
-                # Legacy handling attempt or just ignore suffix
                 meta_str = meta_str.split('|')[0]
                 
             meta = meta_str.split(',')
-            max_val = float(meta[0])
-            if len(meta) > 1:
+            if meta[0] == 'v2':
+                # v2 Format: v2,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative,scales_b64
                 n_dct = int(meta[1])
-            if len(meta) > 2:
                 use_mel = int(meta[2]) == 1
-            if len(meta) > 3:
                 use_mulaw = int(meta[3]) == 1
-            if len(meta) > 5:
                 original_length = int(meta[4])
                 pad_length = int(meta[5])
-            if len(meta) > 6:
                 ignore_negative = int(meta[6]) == 1
-            print(f"Restored metadata: max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}, no_neg={ignore_negative}")
-        except ValueError:
-            print("Failed to parse metadata, using defaults.")
+                scales_b64 = meta[7]
+                max_vals = np.frombuffer(base64.b64decode(scales_b64), dtype=np.float32)
+                print(f"Restored metadata (v2): n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}, no_neg={ignore_negative}, scales_count={len(max_vals)}")
+            else:
+                # Format: "max_val,n_dct,use_mel,use_mulaw,original_length,pad_length,ignore_negative"
+                max_val = float(meta[0])
+                if len(meta) > 1:
+                    n_dct = int(meta[1])
+                if len(meta) > 2:
+                    use_mel = int(meta[2]) == 1
+                if len(meta) > 3:
+                    use_mulaw = int(meta[3]) == 1
+                if len(meta) > 5:
+                    original_length = int(meta[4])
+                    pad_length = int(meta[5])
+                if len(meta) > 6:
+                    ignore_negative = int(meta[6]) == 1
+                print(f"Restored metadata (v1): max_val={max_val:.4f}, n_dct={n_dct}, use_mel={use_mel}, use_mulaw={use_mulaw}, orig_len={original_length}, pad={pad_length}, no_neg={ignore_negative}")
+        except Exception as e:
+            print(f"Failed to parse metadata ({e}), using defaults.")
     else:
         print("No metadata found, using defaults.")
 
@@ -289,8 +318,12 @@ def decode_audio(image_file):
         neg_norm = mu_law_decode(neg_norm)
 
     # Restore amplitude
-    pos_processed = pos_norm * max_val
-    neg_processed = neg_norm * max_val
+    if max_vals is not None:
+        pos_processed = pos_norm * max_vals[:, None]
+        neg_processed = neg_norm * max_vals[:, None]
+    else:
+        pos_processed = pos_norm * max_val
+        neg_processed = neg_norm * max_val
 
     hop_length = n_dct // 4
     
