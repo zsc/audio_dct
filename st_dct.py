@@ -10,17 +10,6 @@ import argparse
 from PIL import Image
 import pillow_avif  # Ensures AVIF support is registered
 
-def generate_synthetic_audio(filename, duration=3.0, sr=16000):
-    """Generate a synthetic audio file."""
-    t = np.linspace(0, duration, int(sr * duration))
-    sweep = np.sin(2 * np.pi * np.linspace(440, 4400, len(t)) * t)
-    tone1 = 0.5 * np.sin(2 * np.pi * 1000 * t)
-    tone2 = 0.3 * np.sin(2 * np.pi * 2000 * t)
-    audio = sweep + tone1 + tone2
-    audio = (audio / np.max(np.abs(audio)) * 32767).astype(np.int16)
-    wavfile.write(filename, sr, audio)
-    print(f"Generated {filename}")
-
 def get_mel_basis(sr, n_dct, n_mels):
     """Generate Mel filter bank for DCT coefficients."""
     # Librosa expects n_fft for STFT, where bins = n_fft // 2 + 1
@@ -182,18 +171,10 @@ def decode_avif_to_audio(avif_file):
 
 def main():
     parser = argparse.ArgumentParser(description="ST-DCT Audio Codec (WAV <-> AVIF)")
-    parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)")
+    parser.add_argument("input_file", help="Input file (.wav for encode, .avif for decode)", default='input.wav')
     parser.add_argument("-q", "--quality", type=int, default=90, help="AVIF encoding quality (0-100)")
     parser.add_argument("-H", "--height", type=int, default=128, help="Image height (number of Mel bands)")
     
-    if len(sys.argv) == 1:
-        print("No arguments provided. Running demo mode...")
-        input_file = 'input.wav'
-        if not os.path.exists(input_file):
-            generate_synthetic_audio(input_file)
-        encode_audio_to_avif(input_file, height=128, quality=90)
-        return
-
     args = parser.parse_args()
     input_file = args.input_file
     
