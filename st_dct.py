@@ -86,6 +86,8 @@ def encode_audio(audio_file, height=128, quality=75, use_mel=True, use_png=False
     compressed_signs = zlib.compress(packed_signs)
     encoded_signs = base64.b64encode(compressed_signs).decode('ascii')
     
+    print(f"Sign data size: Packed={len(packed_signs)} bytes, Compressed={len(compressed_signs)} bytes, Base64={len(encoded_signs)} bytes")
+    
     # Use ABS for spectral content
     abs_dct_spec = np.abs(dct_spec)
     
